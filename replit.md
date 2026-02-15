@@ -65,6 +65,10 @@ An autonomous AI agent web application built with a React frontend and Python Fa
 - Frontend builds to `frontend/dist/`, served by FastAPI on port 5000
 
 ## Recent Changes
+- 2026-02-15: Fixed agent refusing to act - strengthened meta-prompt to enforce EXECUTOR role with JSON output format
+- 2026-02-15: Added dual parser (JSON format + ReAct fallback) for robust LLM output handling
+- 2026-02-15: Upgraded UI/UX - gradient branding, mobile-responsive, backdrop blur, smooth animations
+- 2026-02-15: Removed generic error words from error_patterns to reduce false positives
 - 2026-02-15: Step 9 - Enhanced UI with animations, step indicators, error highlighting, retry counters
 - 2026-02-15: Step 8 - Added self-correction & recursive debugging (error detection, retry logic, self_correction WebSocket messages)
 - 2026-02-15: Added long-term memory system (memory_manager.py) with keyword retrieval
