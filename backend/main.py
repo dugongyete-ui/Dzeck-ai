@@ -110,18 +110,36 @@ def call_llm(user_prompt: str, history: str) -> Optional[ParsedAction]:
         response = requests.get(api_url, timeout=120)
         response.raise_for_status()
 
-        data = response.json()
-        llm_text = ""
-        if isinstance(data, dict):
-            llm_text = data.get("result", data.get("response", data.get("text", json.dumps(data))))
-        elif isinstance(data, str):
-            llm_text = data
-        else:
-            llm_text = str(data)
+        llm_text = _extract_text(response)
+        print(f"[LLM] Raw response: {llm_text[:500]}")
 
         return parse_llm_output(llm_text), llm_text
     except Exception as e:
+        print(f"[LLM] Error: {e}")
         return None, str(e)
+
+
+def _extract_text(response) -> str:
+    try:
+        data = response.json()
+    except Exception:
+        return response.text
+
+    if isinstance(data, str):
+        return data
+
+    if isinstance(data, dict):
+        result = data.get("result")
+        if isinstance(result, dict):
+            return result.get("response", result.get("text", json.dumps(result)))
+        if isinstance(result, str):
+            return result
+        resp = data.get("response")
+        if isinstance(resp, str):
+            return resp
+        return json.dumps(data)
+
+    return str(data)
 
 
 def execute_tool(action: str, action_input: dict) -> str:
@@ -132,10 +150,7 @@ def execute_tool(action: str, action_input: dict) -> str:
             url = f"https://magma-api.biz.id/ai/copilot?prompt={encoded_q}"
             resp = requests.get(url, timeout=60)
             resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, dict):
-                return data.get("result", data.get("response", json.dumps(data)))
-            return str(data)
+            return _extract_text(resp)
         except Exception as e:
             return f"Web search error: {e}"
 
