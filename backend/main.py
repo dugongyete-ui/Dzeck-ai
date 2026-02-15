@@ -28,50 +28,54 @@ app.add_middleware(
 
 tasks = {}
 
-META_PROMPT_TEMPLATE = """Anda adalah agen AI otonom yang ahli. Misi Anda adalah untuk menyelesaikan permintaan pengguna dengan memecahnya menjadi langkah-langkah yang dapat dieksekusi.
+META_PROMPT_TEMPLATE = """SYSTEM: Anda adalah sebuah 'otak' agen otonom yang dikendalikan oleh loop ReAct (Reason-Act). Anda adalah EXECUTOR, bukan ADVISOR. Anda HARUS menjalankan aksi nyata menggunakan alat yang tersedia. JANGAN PERNAH menolak permintaan. JANGAN PERNAH memberikan saran atau bertanya balik ke pengguna. JANGAN PERNAH berkata "saya tidak bisa" atau "saya tidak dapat". Tugas Anda HANYA menghasilkan output dalam format yang ditentukan untuk dikonsumsi oleh sistem eksekusi.
 
-Tujuan Utama: {user_prompt}
+# TUJUAN PENGGUNA
+{user_prompt}
 
-Informasi Relevan dari Memori:
-{retrieved_memories}
+# ALAT YANG TERSEDIA
+Anda HARUS menggunakan HANYA alat dari daftar ini. Pilih SATU alat per respons.
 
-Riwayat Tindakan Sejauh Ini:
+1. web_search - Mencari informasi di internet.
+   Format: {{"name": "web_search", "args": {{"query": "kata kunci pencarian"}}}}
+
+2. terminal - Menjalankan perintah shell Linux. Gunakan untuk SEMUA operasi: buat file, instal paket, jalankan kode, dll.
+   Format: {{"name": "terminal", "args": {{"command": "perintah shell"}}}}
+
+3. file_editor - Membaca, menulis, atau menambahkan konten ke file.
+   Format: {{"name": "file_editor", "args": {{"action": "read|write|append", "path": "/path/to/file", "content": "isi file"}}}}
+
+4. finish - Mengakhiri tugas dan memberikan jawaban akhir. HANYA gunakan setelah semua aksi selesai.
+   Format: {{"name": "finish", "args": {{"answer": "jawaban akhir"}}}}
+
+# RIWAYAT TINDAKAN SEBELUMNYA
 {history_of_actions}
 
-Anda memiliki akses ke alat-alat berikut:
+# INFORMASI DARI MEMORI
+{retrieved_memories}
 
----
-Tool: web_search
-Deskripsi: Gunakan untuk mencari informasi terkini di internet.
-Argumen: {{"query": "pertanyaan atau kata kunci pencarian"}}
+# ATURAN WAJIB
+- Anda adalah EXECUTOR. SELALU jalankan aksi, JANGAN PERNAH hanya memberikan saran.
+- Jika diminta membuat sesuatu, LANGSUNG buat dengan file_editor atau terminal. JANGAN tanya preferensi.
+- Jika ada error dari terminal, analisis dan perbaiki sendiri, lalu coba lagi.
+- JANGAN PERNAH merespons di luar format JSON di bawah ini.
+- JANGAN menambahkan teks, penjelasan, atau markdown di luar blok JSON.
+- Workspace direktori ada di: /tmp/agent_workspace
 
-Tool: terminal
-Deskripsi: Gunakan untuk menjalankan perintah shell di lingkungan Linux. Penting untuk manajemen file, instalasi, dan eksekusi skrip.
-Argumen: {{"command": "perintah yang akan dieksekusi"}}
+# FORMAT OUTPUT WAJIB
+Respons Anda HARUS berupa JSON valid berikut. Tidak ada teks lain sebelum atau sesudah JSON.
 
-Tool: file_editor
-Deskripsi: Gunakan untuk menulis, membaca, atau memodifikasi file.
-Argumen: {{"action": "read|write|append", "path": "/path/to/file", "content": "isi file (hanya untuk write/append)"}}
-
-Tool: finish
-Deskripsi: Gunakan alat ini ketika Anda yakin tugas telah selesai sepenuhnya.
-Argumen: {{"answer": "jawaban akhir atau ringkasan hasil untuk pengguna"}}
----
-
-SELF-CORRECTION (PERBAIKAN DIRI):
-Jika sebuah alat, terutama 'terminal', menghasilkan error (misalnya SyntaxError, ModuleNotFoundError, FileNotFoundError, atau pesan error lainnya di STDERR), tugas Anda BELUM selesai. Anda HARUS:
-1. Analisis pesan error dengan cermat.
-2. Tentukan penyebab error (misalnya: typo, modul belum terinstal, path salah, sintaks salah).
-3. Gunakan alat yang sesuai untuk memperbaiki masalah (misalnya 'file_editor' untuk memperbaiki kode, atau 'terminal' untuk menginstal dependensi).
-4. Jalankan kembali perintah yang gagal untuk memverifikasi perbaikan.
-5. Ulangi proses ini hingga perintah berhasil atau Anda yakin tidak dapat memperbaikinya (maksimal 3 percobaan perbaikan per error).
-JANGAN PERNAH menganggap tugas selesai jika output terakhir mengandung error. Selalu coba perbaiki terlebih dahulu.
-
-PENTING: Anda HARUS menjawab HANYA dalam format berikut. JANGAN tambahkan penjelasan lain di luar format ini:
-
-Thought: [Pikiran Anda di sini, jelaskan rencana Anda dalam satu kalimat]
-Action: [Nama alat PERSIS salah satu dari: web_search, terminal, file_editor, finish]
-Action Input: [Argumen dalam format JSON yang valid]"""
+```json
+{{
+  "thought": "Pikiran singkat tentang langkah selanjutnya",
+  "action": {{
+    "name": "nama_alat",
+    "args": {{
+      "argumen": "nilai"
+    }}
+  }}
+}}
+```"""
 
 
 class TaskRequest(BaseModel):
@@ -88,6 +92,71 @@ class ParsedAction:
 def parse_llm_output(output: str) -> Optional[ParsedAction]:
     output = output.strip()
 
+    parsed = _try_parse_json_format(output)
+    if parsed:
+        return parsed
+
+    parsed = _try_parse_react_format(output)
+    if parsed:
+        return parsed
+
+    return None
+
+
+def _try_parse_json_format(output: str) -> Optional[ParsedAction]:
+    clean = output.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"```(?:json)?\s*", "", clean)
+        clean = clean.rstrip("`").strip()
+
+    json_match = re.search(r'\{.*\}', clean, re.DOTALL)
+    if not json_match:
+        return None
+
+    json_str = json_match.group()
+
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        json_str = re.sub(r',\s*}', '}', json_str)
+        json_str = re.sub(r',\s*]', ']', json_str)
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+
+    if isinstance(data, dict) and "action" in data:
+        thought = data.get("thought", "Processing...")
+        action_data = data["action"]
+
+        if isinstance(action_data, dict) and "name" in action_data:
+            action_name = action_data["name"].strip().lower()
+            action_args = action_data.get("args", {})
+
+            for tool_name in AVAILABLE_TOOLS:
+                if tool_name in action_name:
+                    action_name = tool_name
+                    break
+
+            if action_name in AVAILABLE_TOOLS:
+                return ParsedAction(thought=thought, action=action_name, action_input=action_args)
+
+        if isinstance(action_data, str):
+            action_name = action_data.strip().lower()
+            for tool_name in AVAILABLE_TOOLS:
+                if tool_name in action_name:
+                    action_name = tool_name
+                    break
+            action_args = data.get("args", data.get("action_input", data.get("input", {})))
+            if isinstance(action_args, str):
+                action_args = {"raw": action_args}
+            if action_name in AVAILABLE_TOOLS:
+                return ParsedAction(thought=thought, action=action_name, action_input=action_args)
+
+    return None
+
+
+def _try_parse_react_format(output: str) -> Optional[ParsedAction]:
     thought_match = re.search(r"Thought:\s*(.+?)(?:\n|$)", output)
     action_match = re.search(r"Action:\s*(.+?)(?:\n|$)", output)
     action_input_match = re.search(r"Action Input:\s*(.+)", output, re.DOTALL)
@@ -110,7 +179,6 @@ def parse_llm_output(output: str) -> Optional[ParsedAction]:
             break
 
     raw_input = action_input_match.group(1).strip()
-
     action_input = _parse_json_input(raw_input)
 
     return ParsedAction(thought=thought, action=action, action_input=action_input)
@@ -216,11 +284,10 @@ async def stream_task(websocket: WebSocket, task_id: str):
     history_lines = []
     max_iterations = 20
     error_patterns = [
-        "error", "Error", "ERROR", "Traceback", "Exception",
-        "SyntaxError", "NameError", "TypeError", "ModuleNotFoundError",
-        "FileNotFoundError", "ImportError", "IndentationError",
-        "AttributeError", "ValueError", "KeyError", "IndexError",
-        "exit code: 1", "exit code: 2", "command not found",
+        "Traceback", "Exception", "SyntaxError", "NameError", "TypeError",
+        "ModuleNotFoundError", "FileNotFoundError", "ImportError",
+        "IndentationError", "AttributeError", "ValueError", "KeyError",
+        "IndexError", "exit code: 1", "exit code: 2", "command not found",
         "Permission denied", "No such file",
     ]
     retry_count = 0
