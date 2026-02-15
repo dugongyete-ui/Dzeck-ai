@@ -3,8 +3,10 @@ import json
 import os
 import re
 import uuid
+import time
 import urllib.parse
 from typing import Optional
+from collections import defaultdict
 
 import requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -13,8 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from tool_executor import execute_tool, AVAILABLE_TOOLS
-from memory_manager import retrieve_memories, save_task_result, save_search_result
+from tool_executor import execute_tool, AVAILABLE_TOOLS, get_task_workspace, cleanup_workspace
+from memory_manager import retrieve_memories, save_task_result, save_search_result, cleanup_old_memories
 
 app = FastAPI()
 
@@ -28,6 +30,15 @@ app.add_middleware(
 
 tasks = {}
 
+MAX_CONCURRENT_TASKS = 10
+MAX_TASKS_PER_IP = 3
+TASK_EXPIRY_SECONDS = 600
+
+_active_tasks_by_ip = defaultdict(int)
+_api_call_timestamps = []
+API_RATE_LIMIT = 20
+API_RATE_WINDOW = 60
+
 PLANNER_PROMPT = """Saya sedang mengerjakan tugas berikut dan butuh bantuan langkah demi langkah.
 
 TUGAS: {user_prompt}
@@ -37,21 +48,14 @@ TUGAS: {user_prompt}
 {memory_section}
 
 Saya bekerja di lingkungan Linux dengan akses terminal, editor file, dan pencarian web.
-Direktori kerja saya: /tmp/agent_workspace
+Direktori kerja saya: {workspace_dir}
 
-Berikan saya SATU langkah berikutnya yang harus dilakukan. Sertakan perintah terminal yang tepat, atau kode file yang perlu ditulis. Jangan berikan banyak opsi, pilihkan satu yang terbaik dan berikan perintah/kode konkret yang bisa langsung dijalankan."""
-
-INTERPRETER_PROMPT = """Dari respons AI berikut, ekstrak SATU aksi konkret yang bisa dijalankan.
-
-RESPONS AI:
-{llm_response}
-
-TUGAS ASLI: {user_prompt}
-
-Berikan dalam format ini saja (tanpa teks lain):
-AKSI: [terminal/file_write/file_read/web_search/selesai]
-DETAIL: [perintah/path/query/jawaban]
-KONTEN: [isi file jika ada]"""
+ATURAN PENTING:
+- Berikan saya SATU langkah berikutnya saja.
+- Sertakan perintah terminal yang tepat dalam blok kode ```bash, atau kode file dalam blok kode yang sesuai.
+- Jangan berikan banyak opsi, pilihkan satu yang terbaik.
+- Jika tugas sudah selesai berdasarkan riwayat di atas, katakan "TUGAS SELESAI:" diikuti ringkasan hasil.
+- Jangan menambahkan langkah-langkah yang tidak diminta pengguna."""
 
 
 class TaskRequest(BaseModel):
@@ -63,6 +67,32 @@ class ParsedAction:
         self.thought = thought
         self.action = action
         self.action_input = action_input
+
+
+def _check_api_rate_limit() -> bool:
+    now = time.time()
+    _api_call_timestamps[:] = [t for t in _api_call_timestamps if now - t < API_RATE_WINDOW]
+    if len(_api_call_timestamps) >= API_RATE_LIMIT:
+        return False
+    _api_call_timestamps.append(now)
+    return True
+
+
+def _cleanup_expired_tasks():
+    now = time.time()
+    expired = []
+    for tid, task in tasks.items():
+        created = task.get("created_at", 0)
+        if now - created > TASK_EXPIRY_SECONDS and task.get("status") not in ("running",):
+            expired.append(tid)
+    for tid in expired:
+        ip = tasks[tid].get("ip", "unknown")
+        if _active_tasks_by_ip[ip] > 0:
+            _active_tasks_by_ip[ip] -= 1
+        cleanup_workspace(tid)
+        del tasks[tid]
+    if expired:
+        print(f"[CLEANUP] Removed {len(expired)} expired tasks")
 
 
 def _extract_text(response) -> str:
@@ -89,6 +119,8 @@ def _extract_text(response) -> str:
 
 
 def _call_api(prompt: str) -> str:
+    if not _check_api_rate_limit():
+        raise Exception("API rate limit reached. Please wait a moment and try again.")
     encoded_prompt = urllib.parse.quote(prompt)
     api_url = f"https://magma-api.biz.id/ai/copilot?prompt={encoded_prompt}"
     response = requests.get(api_url, timeout=120)
@@ -120,7 +152,7 @@ def _extract_shell_commands(text: str) -> list:
     return commands
 
 
-def _extract_file_writes(text: str, code_blocks: list) -> Optional[dict]:
+def _extract_file_writes(text: str, code_blocks: list, workspace_dir: str) -> Optional[dict]:
     for block in code_blocks:
         path_patterns = [
             r'(?:file|simpan|buat|tulis|save).*?[`"\']([/\w._-]+\.\w+)[`"\']',
@@ -134,7 +166,7 @@ def _extract_file_writes(text: str, code_blocks: list) -> Optional[dict]:
             if match:
                 path = match.group(1)
                 if not path.startswith('/'):
-                    path = f"/tmp/agent_workspace/{path}"
+                    path = f"{workspace_dir}/{path}"
                 return {"path": path, "content": block["code"]}
 
     for block in code_blocks:
@@ -148,12 +180,29 @@ def _extract_file_writes(text: str, code_blocks: list) -> Optional[dict]:
                 "c": "main.c", "cpp": "main.cpp",
             }
             filename = ext_map.get(block["lang"], f"file.{block['lang']}")
-            return {"path": f"/tmp/agent_workspace/{filename}", "content": block["code"]}
+            return {"path": f"{workspace_dir}/{filename}", "content": block["code"]}
 
     return None
 
 
-def interpret_response(llm_text: str, user_prompt: str, step: int, history: list) -> ParsedAction:
+def interpret_response(llm_text: str, user_prompt: str, step: int, history: list, workspace_dir: str) -> ParsedAction:
+    finish_patterns = [
+        r"TUGAS SELESAI[:\s]*(.*)",
+        r"(?:tugas|task).*(?:selesai|done|complete|finished)[:\s]*(.*)",
+        r"(?:semua|all).*(?:langkah|step).*(?:selesai|done|complete)",
+    ]
+    for pattern in finish_patterns:
+        match = re.search(pattern, llm_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            answer = match.group(1).strip() if match.group(1) else llm_text[:500]
+            if not answer:
+                answer = llm_text[:500]
+            return ParsedAction(
+                thought="Tugas telah selesai",
+                action="finish",
+                action_input={"answer": answer}
+            )
+
     code_blocks = _extract_code_blocks(llm_text)
     shell_commands = _extract_shell_commands(llm_text)
 
@@ -173,7 +222,7 @@ def interpret_response(llm_text: str, user_prompt: str, step: int, history: list
             )
 
     if code_only_blocks and step <= 2:
-        file_write = _extract_file_writes(llm_text, code_only_blocks)
+        file_write = _extract_file_writes(llm_text, code_only_blocks, workspace_dir)
         if file_write:
             thought_excerpt = llm_text[:200].replace('\n', ' ').strip()
             return ParsedAction(
@@ -191,7 +240,7 @@ def interpret_response(llm_text: str, user_prompt: str, step: int, history: list
         )
 
     if code_only_blocks:
-        file_write = _extract_file_writes(llm_text, code_only_blocks)
+        file_write = _extract_file_writes(llm_text, code_only_blocks, workspace_dir)
         if file_write:
             thought_excerpt = llm_text[:200].replace('\n', ' ').strip()
             return ParsedAction(
@@ -268,7 +317,7 @@ def _try_parse_json_format(output: str) -> Optional[ParsedAction]:
     return None
 
 
-def call_llm(user_prompt: str, history: str, memories: str = "", step: int = 1, history_list: list = None):
+def call_llm(user_prompt: str, history: str, memories: str = "", step: int = 1, history_list: list = None, workspace_dir: str = "/tmp/agent_workspaces/default"):
     history_section = ""
     if history and history.strip():
         history_section = f"LANGKAH YANG SUDAH DILAKUKAN:\n{history}\n\nLanjutkan ke langkah berikutnya. Jangan ulangi langkah sebelumnya."
@@ -283,6 +332,7 @@ def call_llm(user_prompt: str, history: str, memories: str = "", step: int = 1, 
         user_prompt=user_prompt,
         history_section=history_section,
         memory_section=memory_section,
+        workspace_dir=workspace_dir,
     )
 
     try:
@@ -294,7 +344,7 @@ def call_llm(user_prompt: str, history: str, memories: str = "", step: int = 1, 
             print(f"[LLM] Parsed as JSON: action={json_parsed.action}")
             return json_parsed, llm_text
 
-        parsed = interpret_response(llm_text, user_prompt, step, history_list or [])
+        parsed = interpret_response(llm_text, user_prompt, step, history_list or [], workspace_dir)
         print(f"[LLM] Interpreted as: action={parsed.action}")
         return parsed, llm_text
 
@@ -305,11 +355,22 @@ def call_llm(user_prompt: str, history: str, memories: str = "", step: int = 1, 
 
 @app.post("/api/v1/agent/start_task")
 async def start_task(req: TaskRequest):
+    _cleanup_expired_tasks()
+
+    active_count = sum(1 for t in tasks.values() if t.get("status") == "running")
+    if active_count >= MAX_CONCURRENT_TASKS:
+        return {"error": "Server is busy. Too many tasks running. Please try again later."}, 429
+
     task_id = str(uuid.uuid4())
+    workspace = get_task_workspace(task_id)
+
     tasks[task_id] = {
         "prompt": req.prompt,
         "status": "pending",
         "history": [],
+        "workspace": workspace,
+        "created_at": time.time(),
+        "session_id": task_id[:12],
     }
     return {"task_id": task_id}
 
@@ -326,6 +387,8 @@ async def stream_task(websocket: WebSocket, task_id: str):
     task = tasks[task_id]
     task["status"] = "running"
     user_prompt = task["prompt"]
+    workspace_dir = task["workspace"]
+    session_id = task["session_id"]
     history_lines = []
     history_list = []
     max_iterations = 20
@@ -341,7 +404,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
     last_failed_command = None
 
     try:
-        memories = await asyncio.to_thread(retrieve_memories, user_prompt)
+        memories = await asyncio.to_thread(retrieve_memories, user_prompt, 5, session_id)
 
         for i in range(max_iterations):
             history_str = "\n".join(history_lines) if history_lines else ""
@@ -354,7 +417,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
             })
 
             parsed, raw_output = await asyncio.to_thread(
-                call_llm, user_prompt, history_str, memories, i + 1, history_list
+                call_llm, user_prompt, history_str, memories, i + 1, history_list, workspace_dir
             )
 
             if parsed is None:
@@ -384,7 +447,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
                     "retries": retry_count,
                 })
                 await asyncio.to_thread(
-                    save_task_result, user_prompt, answer[:500], "finish"
+                    save_task_result, user_prompt, answer[:500], "finish", session_id
                 )
                 task["status"] = "completed"
                 break
@@ -397,7 +460,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
             })
 
             tool_output = await asyncio.to_thread(
-                execute_tool, parsed.action, parsed.action_input
+                execute_tool, parsed.action, parsed.action_input, workspace_dir
             )
 
             has_error = any(pat in tool_output for pat in error_patterns)
@@ -432,7 +495,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
 
             if parsed.action == "web_search":
                 query = parsed.action_input.get("query", parsed.action_input.get("raw", ""))
-                await asyncio.to_thread(save_search_result, query, tool_output[:300])
+                await asyncio.to_thread(save_search_result, query, tool_output[:300], session_id)
 
             await websocket.send_json({
                 "type": "tool_output",
@@ -483,6 +546,22 @@ async def stream_task(websocket: WebSocket, task_id: str):
         except:
             pass
         task["status"] = "error"
+    finally:
+        if task.get("status") in ("completed", "max_iterations", "error", "disconnected"):
+            asyncio.get_event_loop().call_later(300, lambda: _deferred_cleanup(task_id))
+
+
+def _deferred_cleanup(task_id: str):
+    if task_id in tasks:
+        cleanup_workspace(task_id)
+        del tasks[task_id]
+        print(f"[CLEANUP] Deferred cleanup for task {task_id[:8]}")
+
+
+@app.on_event("startup")
+async def startup_cleanup():
+    cleanup_old_memories(24)
+    print("[STARTUP] Memory cleanup complete")
 
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "dist")

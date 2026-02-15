@@ -32,6 +32,10 @@ args = "cd /home/runner/workspace && npx vite build 2>&1 && cd backend && python
 waitForPort = 5000
 
 [[ports]]
+localPort = 3000
+externalPort = 3000
+
+[[ports]]
 localPort = 5000
 externalPort = 80
 
