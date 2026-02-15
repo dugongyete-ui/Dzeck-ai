@@ -61,8 +61,9 @@ An autonomous AI agent web application built with a React frontend and Python Fa
 9. Real-time updates stream to the frontend with step numbers and retry counts
 
 ## Running
-- Workflow: `./node_modules/.bin/vite build && python backend/main.py`
+- Workflow: `npx --yes vite build && python backend/main.py`
 - Frontend builds to `frontend/dist/`, served by FastAPI on port 5000
+- Quick setup: `bash setup.sh` (installs all Node.js + Python deps and builds frontend)
 
 ## Multi-User Safety
 - **Workspace Isolation:** Each task gets its own directory at `/tmp/agent_workspaces/{task_id[:12]}/`
@@ -72,6 +73,7 @@ An autonomous AI agent web application built with a React frontend and Python Fa
 - **Thread Safety:** Threading locks on memory file read/write operations
 
 ## Recent Changes
+- 2026-02-15: Added setup.sh auto-download dependencies script for quick project setup
 - 2026-02-15: Multi-user safety - isolated workspaces per task, separated memory per session, rate limiting (20 calls/60s, 10 max concurrent), auto-cleanup of expired tasks/workspaces
 - 2026-02-15: Added dual parser (JSON format + ReAct fallback) for robust LLM output handling
 - 2026-02-15: Upgraded UI/UX - gradient branding, mobile-responsive, backdrop blur, smooth animations
