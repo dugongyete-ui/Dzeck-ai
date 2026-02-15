@@ -64,15 +64,18 @@ An autonomous AI agent web application built with a React frontend and Python Fa
 - Workflow: `./node_modules/.bin/vite build && python backend/main.py`
 - Frontend builds to `frontend/dist/`, served by FastAPI on port 5000
 
+## Multi-User Safety
+- **Workspace Isolation:** Each task gets its own directory at `/tmp/agent_workspaces/{task_id[:12]}/`
+- **Memory Separation:** Each session has its own memory file at `/tmp/agent_memories/{session_id}.json`
+- **Rate Limiting:** Max 20 API calls per 60 seconds, max 10 concurrent tasks
+- **Auto Cleanup:** Workspaces deleted 5 minutes after task completion, memory files cleaned after 24 hours
+- **Thread Safety:** Threading locks on memory file read/write operations
+
 ## Recent Changes
-- 2026-02-15: Implemented Meta-Prompt v3 "Inception Prompting" - dehumanized prompt treating LLM as "Raw Data Processing Unit" with extreme JSON-only constraints, structural markers ([SYSTEM SIMULATION START], [START JSON OUTPUT]), and zero room for refusal
-- 2026-02-15: Fixed agent refusing to act - strengthened meta-prompt to enforce EXECUTOR role with JSON output format
+- 2026-02-15: Multi-user safety - isolated workspaces per task, separated memory per session, rate limiting (20 calls/60s, 10 max concurrent), auto-cleanup of expired tasks/workspaces
 - 2026-02-15: Added dual parser (JSON format + ReAct fallback) for robust LLM output handling
 - 2026-02-15: Upgraded UI/UX - gradient branding, mobile-responsive, backdrop blur, smooth animations
-- 2026-02-15: Removed generic error words from error_patterns to reduce false positives
-- 2026-02-15: Step 9 - Enhanced UI with animations, step indicators, error highlighting, retry counters
-- 2026-02-15: Step 8 - Added self-correction & recursive debugging (error detection, retry logic, self_correction WebSocket messages)
+- 2026-02-15: Enhanced UI with animations, step indicators, error highlighting, retry counters
+- 2026-02-15: Added self-correction & recursive debugging (error detection, retry logic)
 - 2026-02-15: Added long-term memory system (memory_manager.py) with keyword retrieval
-- 2026-02-15: Improved tool argument normalization and robust JSON parsing
-- 2026-02-15: Refactored tool execution into separate `tool_executor.py` module with dispatcher pattern
 - 2026-02-15: Initial build of full-stack autonomous AI agent
