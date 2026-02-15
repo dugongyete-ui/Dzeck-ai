@@ -28,7 +28,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd /home/runner/workspace && ./node_modules/.bin/vite build 2>&1 && python backend/main.py"
+args = "cd /home/runner/workspace && npx vite build 2>&1 && cd backend && python main.py"
 waitForPort = 5000
 
 [[ports]]
