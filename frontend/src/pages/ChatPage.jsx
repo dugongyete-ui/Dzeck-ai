@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Settings, Send, Plus, MessageSquare, Bot, User, Terminal, Search, FileText, CheckCircle, Loader2, AlertCircle, ChevronLeft, Menu, X } from 'lucide-react'
+import { Settings, Send, Plus, MessageSquare, Bot, User, Terminal, Search, FileText, CheckCircle, Loader2, AlertCircle, ChevronLeft, Menu, X, Sparkles, Code, Globe } from 'lucide-react'
 import useStore from '../store'
 import StatusIndicator from '../components/StatusIndicator'
 import MessageBubble from '../components/MessageBubble'
@@ -106,7 +106,8 @@ function ChatPage() {
       }
 
       ws.onclose = () => {
-        if (useStore.getState().agentStatus === 'running' || useStore.getState().agentStatus === 'thinking') {
+        const currentStatus = useStore.getState().agentStatus
+        if (['running', 'thinking', 'self-correcting'].includes(currentStatus) || currentStatus.startsWith('executing')) {
           setAgentStatus('idle')
         }
       }
@@ -129,33 +130,35 @@ function ChatPage() {
     setSidebarOpen(false)
   }
 
-  const isRunning = ['running', 'thinking', 'starting'].includes(agentStatus) || agentStatus.startsWith('executing')
+  const isRunning = ['running', 'thinking', 'starting', 'self-correcting'].includes(agentStatus) || agentStatus.startsWith('executing')
 
   return (
     <div className="flex h-screen overflow-hidden">
       {sidebarOpen && (
-        <div className="fixed inset-0 bg-black/50 z-30 lg:hidden" onClick={() => setSidebarOpen(false)} />
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 lg:hidden" onClick={() => setSidebarOpen(false)} />
       )}
 
       <aside className={`
         fixed lg:static inset-y-0 left-0 z-40 w-72 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800
-        transform transition-transform duration-200 ease-in-out
+        transform transition-transform duration-300 ease-in-out
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         flex flex-col
       `}>
         <div className="p-4 border-b border-gray-200 dark:border-gray-800">
           <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <Bot className="w-6 h-6 text-primary-500" />
-              <h1 className="text-lg font-bold">AI Agent</h1>
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center">
+                <Sparkles className="w-4 h-4 text-white" />
+              </div>
+              <h1 className="text-lg font-bold tracking-tight">Dzack AI</h1>
             </div>
-            <button onClick={() => setSidebarOpen(false)} className="lg:hidden p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+            <button onClick={() => setSidebarOpen(false)} className="lg:hidden p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors">
               <X className="w-5 h-5" />
             </button>
           </div>
           <button
             onClick={handleNewChat}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors font-medium"
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white rounded-xl transition-all font-medium shadow-sm hover:shadow-md active:scale-[0.98]"
           >
             <Plus className="w-4 h-4" />
             New Chat
@@ -164,19 +167,25 @@ function ChatPage() {
 
         <div className="flex-1 overflow-y-auto p-2 scrollbar-thin">
           {conversations.length === 0 && (
-            <p className="text-center text-sm text-gray-400 dark:text-gray-600 mt-8">No conversations yet</p>
+            <div className="text-center mt-12 px-4">
+              <div className="w-10 h-10 rounded-xl bg-gray-100 dark:bg-gray-800 flex items-center justify-center mx-auto mb-3">
+                <MessageSquare className="w-5 h-5 text-gray-400" />
+              </div>
+              <p className="text-sm text-gray-400 dark:text-gray-600">No conversations yet</p>
+              <p className="text-xs text-gray-300 dark:text-gray-700 mt-1">Start a new chat above</p>
+            </div>
           )}
           {conversations.map(conv => (
             <button
               key={conv.id}
               onClick={() => { loadConversation(conv.id); setSidebarOpen(false) }}
-              className={`w-full text-left px-3 py-2.5 rounded-lg mb-1 flex items-center gap-2 text-sm transition-colors
+              className={`w-full text-left px-3 py-2.5 rounded-xl mb-1 flex items-center gap-2.5 text-sm transition-all
                 ${conv.id === activeConversationId
-                  ? 'bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300'
+                  ? 'bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 shadow-sm'
                   : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300'
                 }`}
             >
-              <MessageSquare className="w-4 h-4 shrink-0" />
+              <MessageSquare className="w-4 h-4 shrink-0 opacity-60" />
               <span className="truncate">{conv.title}</span>
             </button>
           ))}
@@ -185,7 +194,7 @@ function ChatPage() {
         <div className="p-3 border-t border-gray-200 dark:border-gray-800">
           <Link
             to="/settings"
-            className="flex items-center gap-2 px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+            className="flex items-center gap-2.5 px-3 py-2.5 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-xl transition-colors"
           >
             <Settings className="w-4 h-4" />
             Settings
@@ -194,8 +203,8 @@ function ChatPage() {
       </aside>
 
       <main className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex items-center px-4 gap-3 shrink-0">
-          <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg">
+        <header className="h-14 border-b border-gray-200 dark:border-gray-800 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md flex items-center px-4 gap-3 shrink-0 sticky top-0 z-10">
+          <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors">
             <Menu className="w-5 h-5" />
           </button>
           <div className="flex-1 min-w-0">
@@ -203,30 +212,30 @@ function ChatPage() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-4 py-6 scrollbar-thin">
+        <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-4 sm:py-6 scrollbar-thin">
           {messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center max-w-lg mx-auto">
-              <div className="w-16 h-16 rounded-2xl bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center mb-6">
-                <Bot className="w-8 h-8 text-primary-500" />
+            <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto px-4 animate-fade-in">
+              <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-gradient-to-br from-primary-100 to-primary-200 dark:from-primary-900/40 dark:to-primary-800/30 flex items-center justify-center mb-6 shadow-lg">
+                <Sparkles className="w-8 h-8 sm:w-10 sm:h-10 text-primary-500" />
               </div>
-              <h2 className="text-2xl font-bold mb-2">Autonomous AI Agent</h2>
-              <p className="text-gray-500 dark:text-gray-400 mb-8">
-                I can search the web, run commands, create files, and solve complex tasks step by step. What would you like me to do?
+              <h2 className="text-xl sm:text-2xl font-bold mb-2 tracking-tight">Dzack AI Agent</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mb-8 leading-relaxed">
+                I can search the web, run commands, create files, and solve complex tasks autonomously.
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full">
                 {[
-                  { icon: Search, text: 'Search for the latest news about AI' },
-                  { icon: Terminal, text: 'Create a Python hello world script' },
-                  { icon: FileText, text: 'Write a to-do list to a file' },
-                  { icon: Bot, text: 'Explain how you work as an agent' },
+                  { icon: Globe, text: 'Search for the latest news about AI', color: 'text-blue-500' },
+                  { icon: Code, text: 'Create a Python hello world script', color: 'text-green-500' },
+                  { icon: FileText, text: 'Write a to-do list to a file', color: 'text-orange-500' },
+                  { icon: Bot, text: 'Explain how you work as an agent', color: 'text-purple-500' },
                 ].map((item, i) => (
                   <button
                     key={i}
                     onClick={() => { setInput(item.text) }}
-                    className="flex items-center gap-3 p-3 text-left text-sm border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                    className="flex items-center gap-3 p-3.5 text-left text-sm border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-all hover:shadow-sm active:scale-[0.98]"
                   >
-                    <item.icon className="w-4 h-4 text-primary-500 shrink-0" />
-                    <span>{item.text}</span>
+                    <item.icon className={`w-4 h-4 ${item.color} shrink-0`} />
+                    <span className="line-clamp-2">{item.text}</span>
                   </button>
                 ))}
               </div>
@@ -241,9 +250,9 @@ function ChatPage() {
           )}
         </div>
 
-        <div className="border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
+        <div className="border-t border-gray-200 dark:border-gray-800 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md p-3 sm:p-4">
           <div className="max-w-3xl mx-auto">
-            <div className="flex items-end gap-2 bg-gray-100 dark:bg-gray-800 rounded-xl p-2">
+            <div className="flex items-end gap-2 bg-gray-100 dark:bg-gray-800 rounded-2xl p-2 shadow-sm border border-gray-200/50 dark:border-gray-700/50">
               <textarea
                 ref={textareaRef}
                 value={input}
@@ -251,19 +260,19 @@ function ChatPage() {
                 onKeyDown={handleKeyDown}
                 placeholder="Type your task or question..."
                 rows={1}
-                className="flex-1 bg-transparent resize-none outline-none px-2 py-1.5 text-sm placeholder-gray-400 dark:placeholder-gray-500 max-h-[150px]"
+                className="flex-1 bg-transparent resize-none outline-none px-3 py-2 text-sm placeholder-gray-400 dark:placeholder-gray-500 max-h-[150px]"
                 disabled={isRunning}
               />
               <button
                 onClick={sendMessage}
                 disabled={!input.trim() || isRunning}
-                className="p-2 rounded-lg bg-primary-500 hover:bg-primary-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors shrink-0"
+                className="p-2.5 rounded-xl bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-all shrink-0 shadow-sm hover:shadow-md active:scale-95"
               >
                 {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               </button>
             </div>
-            <p className="text-xs text-gray-400 dark:text-gray-600 mt-2 text-center">
-              The agent can execute commands and browse the web. Use responsibly.
+            <p className="text-[11px] text-gray-400 dark:text-gray-600 mt-2 text-center">
+              Autonomous agent with self-correction. Use responsibly.
             </p>
           </div>
         </div>
