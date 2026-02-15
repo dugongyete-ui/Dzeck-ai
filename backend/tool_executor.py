@@ -117,17 +117,64 @@ AVAILABLE_TOOLS = {
     "finish": finish,
 }
 
+TOOL_ARG_MAP = {
+    "web_search": {"q": "query", "search": "query", "keyword": "query", "keywords": "query", "search_query": "query"},
+    "terminal": {"cmd": "command", "shell": "command", "exec": "command", "run": "command"},
+    "file_editor": {"file_path": "path", "filepath": "path", "filename": "path", "file": "path", "text": "content", "data": "content", "body": "content", "operation": "action", "mode": "action", "type": "action"},
+    "finish": {"result": "answer", "response": "answer", "message": "answer", "output": "answer", "summary": "answer"},
+}
+
+
+def _normalize_args(action: str, action_input: dict) -> dict:
+    if "raw" in action_input and len(action_input) == 1:
+        raw_val = action_input["raw"]
+        if action == "web_search":
+            return {"query": raw_val}
+        elif action == "terminal":
+            return {"command": raw_val}
+        elif action == "finish":
+            return {"answer": raw_val}
+
+    if action not in TOOL_ARG_MAP:
+        return action_input
+
+    alias_map = TOOL_ARG_MAP[action]
+    normalized = {}
+    for key, value in action_input.items():
+        canonical = alias_map.get(key.lower(), key)
+        normalized[canonical] = value
+
+    return normalized
+
 
 def execute_tool(action: str, action_input: dict) -> str:
+    action = action.strip().lower()
+
     if action not in AVAILABLE_TOOLS:
         return f"Error: Tool '{action}' not found. Available tools: {', '.join(AVAILABLE_TOOLS.keys())}"
 
+    normalized_input = _normalize_args(action, action_input)
     tool_function = AVAILABLE_TOOLS[action]
 
     try:
-        result = tool_function(**action_input)
-        return result
+        result = tool_function(**normalized_input)
+        return result if result else "(no output)"
     except TypeError as e:
-        return f"Error: Invalid arguments for tool '{action}': {e}"
+        print(f"[TOOL] TypeError for '{action}' with args {normalized_input}: {e}")
+        try:
+            if action == "web_search":
+                first_val = next(iter(normalized_input.values()), "")
+                return web_search(query=str(first_val))
+            elif action == "terminal":
+                first_val = next(iter(normalized_input.values()), "")
+                return terminal(command=str(first_val))
+            elif action == "file_editor":
+                return f"File editor requires 'action' and 'path' arguments. Got: {list(normalized_input.keys())}"
+            elif action == "finish":
+                first_val = next(iter(normalized_input.values()), "Task completed.")
+                return finish(answer=str(first_val))
+        except Exception as fallback_e:
+            return f"Error executing tool '{action}': {fallback_e}"
+        return f"Error: Invalid arguments for tool '{action}': {e}. Expected args: {list(normalized_input.keys())}"
     except Exception as e:
         return f"Error executing tool '{action}': {e}"
