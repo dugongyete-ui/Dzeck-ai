@@ -1,0 +1,173 @@
+
+Ini adalah proyek yang sangat ambisius dan menarik. Saya akan memberikan Anda "cetak biru" atau dokumentasi 100% transparan seperti yang Anda minta. Ini bukan hanya satu prompt, melainkan sebuah **arsitektur dan rencana implementasi lengkap** yang mencakup frontend, backend, dan "otak" agen itu sendiri.
+
+Mari kita mulai.
+
+### **Dokumentasi Lengkap: Membangun Agen AI Otonom Full-Stack**
+
+Proyek ini akan kita bagi menjadi tiga komponen utama:
+1.  **Frontend (UI):** Antarmuka web tempat pengguna berinteraksi.
+2.  **Backend (Server):** Otak yang menerima permintaan dari UI, mengelola logika agen, dan berkomunikasi dengan API.
+3.  **Core Agent Logic:** Mesin pemikir (seperti siklus ReAct) yang merencanakan dan mengeksekusi tugas.
+
+---
+
+### **Bagian 1: Frontend - Antarmuka Pengguna (UI)**
+
+Tujuannya adalah membuat UI yang bersih, responsif (ramah seluler), dan fungsional.
+
+**Teknologi yang Direkomendasikan:**
+*   **Framework:** **React.js** atau **Next.js**. Next.js lebih disarankan karena memudahkan routing dan rendering sisi server, yang baik untuk performa awal.
+*   **Styling:** **Tailwind CSS**. Ini adalah pilihan terbaik untuk membangun UI responsif dengan cepat tanpa menulis banyak kode CSS manual.
+*   **State Management:** **Zustand** atau **React Context**. Untuk mengelola state global seperti riwayat percakapan dan status agen (misalnya, "berpikir...", "menjalankan kode...").
+
+**Struktur Halaman (Tab/Komponen):**
+
+1.  **Halaman Utama (`/`) - Chat Interface:**
+    *   **Input Box:** Area teks utama tempat pengguna mengetik permintaan mereka. Harus bisa menangani input multi-baris.
+    *   **Send Button:** Tombol untuk mengirim permintaan.
+    *   **Chat History:** Area utama yang menampilkan dialog antara pengguna dan AI. Setiap pesan harus memiliki penanda (misalnya, ikon pengguna dan ikon AI).
+    *   **Status Indicator:** Teks atau ikon kecil yang menunjukkan status agen saat ini: `Idle`, `Thinking`, `Executing Tool: Web Search`, `Error`. Ini sangat penting untuk transparansi.
+
+2.  **Halaman Pengaturan (`/settings`) - Opsional tapi Penting:**
+    *   **API Endpoint Configuration:** Input untuk mengubah URL API endpoint. Ini memungkinkan Anda untuk beralih antara endpoint lokal dan produksi.
+    *   **UI Theme:** Tombol untuk beralih antara mode terang (light) dan gelap (dark).
+
+**Desain Responsif dengan Tailwind CSS:**
+Gunakan prefiks responsif dari Tailwind (`sm:`, `md:`, `lg:`) untuk menyesuaikan tata letak.
+*   **Mobile (Default):** Tampilan satu kolom sederhana. Input box di bagian bawah layar.
+*   **Tablet (`md:`):** Mungkin ada sedikit lebih banyak ruang, sidebar bisa muncul.
+*   **Desktop (`lg:`):** Tampilan tiga kolom klasik: sidebar untuk riwayat percakapan/proyek, jendela chat utama, dan panel detail/status di kanan.
+
+---
+
+### **Bagian 2: Backend - Server & Otak Agen**
+
+Ini adalah inti dari sistem Anda. Server ini akan menjalankan logika agen.
+
+**Teknologi yang Direkomendasikan:**
+*   **Bahasa/Framework:** **Python** dengan **FastAPI**. FastAPI sangat cepat, modern, dan memiliki dokumentasi otomatis yang luar biasa, membuatnya ideal untuk membangun API.
+*   **WebSockets:** Gunakan **FastAPI WebSockets** untuk komunikasi real-time antara backend dan frontend. Ini memungkinkan backend untuk "mengirim" pembaruan status (`Thinking...`, `Found a result!`) ke UI tanpa UI harus terus-menerus bertanya.
+
+**Struktur API Endpoint:**
+
+1.  **`POST /api/v1/agent/start_task`**
+    *   **Fungsi:** Menerima permintaan awal dari pengguna.
+    *   **Input:** `{ "prompt": "string" }`
+    *   **Proses:**
+        1.  Memulai sesi baru untuk tugas tersebut.
+        2.  Menjalankan **Core Agent Logic** (dijelaskan di Bagian 3) dengan prompt yang diberikan.
+        3.  Mengembalikan ID tugas (`task_id`) agar UI dapat terhubung untuk menerima pembaruan.
+
+2.  **`WS /ws/agent/stream/{task_id}`**
+    *   **Fungsi:** Endpoint WebSocket untuk streaming pembaruan tugas secara real-time.
+    *   **Proses:** Setelah UI menerima `task_id`, ia akan membuka koneksi WebSocket ke endpoint ini. Backend akan mengirim pesan JSON melalui koneksi ini setiap kali ada pembaruan.
+    *   **Contoh Pesan Stream:**
+        *   `{ "type": "thought", "content": "User wants to build a website. I should start by creating a project folder." }`
+        *   `{ "type": "tool_start", "tool_name": "terminal", "args": "mkdir my-website" }`
+        *   `{ "type": "tool_output", "tool_name": "terminal", "output": "Folder 'my-website' created." }`
+        *   `{ "type": "final_answer", "content": "Saya telah berhasil membuat folder proyek. Selanjutnya, saya akan membuat file index.html." }`
+
+---
+
+### **Bagian 3: Core Agent Logic - "Prompt" & Alat (Tools)**
+
+Ini adalah "jiwa" dari agen Anda. Ini bukan satu prompt, melainkan sebuah **sistem prompt terstruktur** yang berjalan dalam sebuah loop.
+
+**Konsep Inti: Siklus ReAct (Reason + Act)**
+
+Loop ini akan terus berjalan hingga tugas selesai.
+
+1.  **Reason (Berpikir):** Anda memanggil API LLM Anda dengan sebuah "meta-prompt" yang berisi:
+    *   **Tujuan Utama:** Permintaan asli dari pengguna.
+    *   **Riwayat Tindakan:** Apa saja yang sudah dilakukan (alat yang digunakan dan hasilnya).
+    *   **Daftar Alat yang Tersedia:** Deskripsi dari semua alat yang bisa digunakan oleh agen.
+    *   **Instruksi:** "Berdasarkan tujuan dan riwayat, tentukan langkah berikutnya. Pikirkan dalam format `Thought:` dan kemudian pilih alat dalam format `Action: [Tool Name]` dengan argumen `Action Input: [Arguments]`."
+
+2.  **Act (Bertindak):** Backend Anda mem-parsing output dari LLM. Jika LLM menghasilkan `Action: terminal` dengan `Action Input: ls -l`, maka backend Anda akan mengeksekusi perintah `ls -l` di dalam sebuah **subprocess** atau **Docker container** (untuk keamanan).
+
+3.  **Observe (Mengamati):** Hasil dari eksekusi alat (output dari `ls -l`) ditangkap.
+
+4.  **Repeat:** Hasil observasi ini ditambahkan ke **Riwayat Tindakan**, dan siklus kembali ke langkah 1.
+
+**"Prompt" untuk LLM (Meta-Prompt Template):**
+
+Ini adalah prompt yang akan Anda kirim ke endpoint `https://magma-api.biz.id/ai/copilot?prompt=...`. Anda perlu melakukan URL encoding pada konten ini.
+
+```text
+Anda adalah agen AI otonom yang ahli. Misi Anda adalah untuk menyelesaikan permintaan pengguna dengan memecahnya menjadi langkah-langkah yang dapat dieksekusi.
+
+Tujuan Utama: {user_prompt}
+
+Riwayat Tindakan Sejauh Ini:
+{history_of_actions}
+
+Anda memiliki akses ke alat-alat berikut:
+
+---
+Tool: web_search
+Deskripsi: Gunakan untuk mencari informasi terkini di internet.
+Argumen: {"query": "pertanyaan atau kata kunci pencarian"}
+
+Tool: terminal
+Deskripsi: Gunakan untuk menjalankan perintah shell di lingkungan Linux. Penting untuk manajemen file, instalasi, dan eksekusi skrip.
+Argumen: {"command": "perintah yang akan dieksekusi"}
+
+Tool: file_editor
+Deskripsi: Gunakan untuk menulis, membaca, atau memodifikasi file.
+Argumen: {"action": "read|write|append", "path": "/path/to/file", "content": "isi file (hanya untuk write/append)"}
+
+Tool: finish
+Deskripsi: Gunakan alat ini ketika Anda yakin tugas telah selesai sepenuhnya.
+Argumen: {"answer": "jawaban akhir atau ringkasan hasil untuk pengguna"}
+---
+
+Berdasarkan Tujuan Utama dan Riwayat, tentukan langkah Anda selanjutnya.
+Jawab HANYA dalam format berikut, tanpa penjelasan tambahan:
+
+Thought: [Pikiran Anda di sini, jelaskan rencana Anda dalam satu kalimat]
+Action: [Nama Alat]
+Action Input: [Argumen dalam format JSON]
+```
+
+**Cara Menggunakan Endpoint Publik Anda:**
+
+Di dalam backend Python Anda, saat Anda perlu memanggil LLM (langkah "Reason"), Anda akan melakukan ini:
+
+```python
+import requests
+import urllib.parse
+
+def get_llm_decision(user_prompt, history_of_actions):
+    # 1. Bangun meta-prompt lengkap
+    meta_prompt_template = "..." # Template dari atas
+    full_prompt = meta_prompt_template.format(
+        user_prompt=user_prompt,
+        history_of_actions=history_of_actions
+    )
+
+    # 2. URL Encode prompt tersebut
+    encoded_prompt = urllib.parse.quote(full_prompt)
+
+    # 3. Buat URL lengkap
+    api_url = f"https://magma-api.biz.id/ai/copilot?prompt={encoded_prompt}"
+
+    # 4. Panggil API
+    try:
+        response = requests.get(api_url, timeout=120) # Set timeout yang panjang
+        response.raise_for_status() # Cek jika ada error HTTP
+        
+        # 5. Parsing output LLM untuk mendapatkan Thought, Action, dan Action Input
+        llm_output = response.text 
+        # ... (tambahkan logika parsing di sini) ...
+        return parsed_action
+
+    except requests.RequestException as e:
+        print(f"Error memanggil API LLM: {e}")
+        return None
+```
+
+Ini adalah kerangka kerja lengkapnya. Membangunnya membutuhkan keahlian dalam frontend, backend, dan pemahaman tentang cara kerja LLM. Namun, dengan cetak biru ini, Anda memiliki semua komponen yang diperlukan untuk memulai.
+
+---
+Ini adalah fondasi yang sangat kuat. Langkah selanjutnya adalah mulai membangunnya.
