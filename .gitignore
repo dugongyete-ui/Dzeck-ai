@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Node
+node_modules/
+
+# Build output
+frontend/dist/
+.vite/
+
+# Environment
+.env
+.pythonlibs/
