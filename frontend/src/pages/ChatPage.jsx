@@ -60,24 +60,36 @@ function ChatPage() {
             setAgentStatus(data.content.toLowerCase().includes('think') ? 'thinking' : 'running')
             break
           case 'thought':
-            addMessage({ role: 'agent', type: 'thought', content: data.content })
+            addMessage({ role: 'agent', type: 'thought', content: data.content, step: data.step })
             setAgentStatus('thinking')
             break
           case 'tool_start':
             addMessage({
               role: 'agent', type: 'tool_start',
-              tool_name: data.tool_name, content: data.args
+              tool_name: data.tool_name, content: data.args, step: data.step
             })
             setAgentStatus(`executing: ${data.tool_name}`)
             break
           case 'tool_output':
             addMessage({
               role: 'agent', type: 'tool_output',
-              tool_name: data.tool_name, content: data.output
+              tool_name: data.tool_name, content: data.output,
+              has_error: data.has_error, step: data.step
             })
             break
+          case 'self_correction':
+            addMessage({
+              role: 'agent', type: 'self_correction', content: data.content,
+              step: data.step, retry_attempt: data.retry_attempt,
+              max_retries: data.max_retries, error_snippet: data.error_snippet
+            })
+            setAgentStatus('self-correcting')
+            break
           case 'final_answer':
-            addMessage({ role: 'agent', type: 'final_answer', content: data.content })
+            addMessage({
+              role: 'agent', type: 'final_answer', content: data.content,
+              steps_taken: data.steps_taken, retries: data.retries
+            })
             setAgentStatus('idle')
             saveCurrentConversation()
             break

@@ -58,6 +58,15 @@ Deskripsi: Gunakan alat ini ketika Anda yakin tugas telah selesai sepenuhnya.
 Argumen: {{"answer": "jawaban akhir atau ringkasan hasil untuk pengguna"}}
 ---
 
+SELF-CORRECTION (PERBAIKAN DIRI):
+Jika sebuah alat, terutama 'terminal', menghasilkan error (misalnya SyntaxError, ModuleNotFoundError, FileNotFoundError, atau pesan error lainnya di STDERR), tugas Anda BELUM selesai. Anda HARUS:
+1. Analisis pesan error dengan cermat.
+2. Tentukan penyebab error (misalnya: typo, modul belum terinstal, path salah, sintaks salah).
+3. Gunakan alat yang sesuai untuk memperbaiki masalah (misalnya 'file_editor' untuk memperbaiki kode, atau 'terminal' untuk menginstal dependensi).
+4. Jalankan kembali perintah yang gagal untuk memverifikasi perbaikan.
+5. Ulangi proses ini hingga perintah berhasil atau Anda yakin tidak dapat memperbaikinya (maksimal 3 percobaan perbaikan per error).
+JANGAN PERNAH menganggap tugas selesai jika output terakhir mengandung error. Selalu coba perbaiki terlebih dahulu.
+
 PENTING: Anda HARUS menjawab HANYA dalam format berikut. JANGAN tambahkan penjelasan lain di luar format ini:
 
 Thought: [Pikiran Anda di sini, jelaskan rencana Anda dalam satu kalimat]
@@ -205,7 +214,18 @@ async def stream_task(websocket: WebSocket, task_id: str):
     task["status"] = "running"
     user_prompt = task["prompt"]
     history_lines = []
-    max_iterations = 15
+    max_iterations = 20
+    error_patterns = [
+        "error", "Error", "ERROR", "Traceback", "Exception",
+        "SyntaxError", "NameError", "TypeError", "ModuleNotFoundError",
+        "FileNotFoundError", "ImportError", "IndentationError",
+        "AttributeError", "ValueError", "KeyError", "IndexError",
+        "exit code: 1", "exit code: 2", "command not found",
+        "Permission denied", "No such file",
+    ]
+    retry_count = 0
+    max_retries_per_error = 3
+    last_failed_command = None
 
     try:
         memories = await asyncio.to_thread(retrieve_memories, user_prompt)
@@ -215,6 +235,8 @@ async def stream_task(websocket: WebSocket, task_id: str):
 
             await websocket.send_json({
                 "type": "status",
+                "step": i + 1,
+                "total_steps": max_iterations,
                 "content": f"Thinking... (step {i+1})"
             })
 
@@ -236,6 +258,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
 
             await websocket.send_json({
                 "type": "thought",
+                "step": i + 1,
                 "content": parsed.thought
             })
 
@@ -243,7 +266,9 @@ async def stream_task(websocket: WebSocket, task_id: str):
                 answer = parsed.action_input.get("answer", parsed.action_input.get("raw", "Task completed."))
                 await websocket.send_json({
                     "type": "final_answer",
-                    "content": answer
+                    "content": answer,
+                    "steps_taken": i + 1,
+                    "retries": retry_count,
                 })
                 await asyncio.to_thread(
                     save_task_result, user_prompt, answer, "finish"
@@ -253,6 +278,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
 
             await websocket.send_json({
                 "type": "tool_start",
+                "step": i + 1,
                 "tool_name": parsed.action,
                 "args": json.dumps(parsed.action_input, ensure_ascii=False)
             })
@@ -261,13 +287,45 @@ async def stream_task(websocket: WebSocket, task_id: str):
                 execute_tool, parsed.action, parsed.action_input
             )
 
+            has_error = any(pat in tool_output for pat in error_patterns)
+
+            if has_error and parsed.action == "terminal":
+                retry_count += 1
+                is_same_error = (last_failed_command == json.dumps(parsed.action_input))
+                same_error_retries = retry_count if is_same_error else 1
+                last_failed_command = json.dumps(parsed.action_input)
+
+                if same_error_retries <= max_retries_per_error:
+                    await websocket.send_json({
+                        "type": "self_correction",
+                        "step": i + 1,
+                        "retry_attempt": same_error_retries,
+                        "max_retries": max_retries_per_error,
+                        "error_snippet": tool_output[:300],
+                        "content": f"Error detected. Attempting self-correction (attempt {same_error_retries}/{max_retries_per_error})..."
+                    })
+                else:
+                    await websocket.send_json({
+                        "type": "self_correction",
+                        "step": i + 1,
+                        "retry_attempt": same_error_retries,
+                        "max_retries": max_retries_per_error,
+                        "content": f"Max retries reached for this error. Moving on..."
+                    })
+                    last_failed_command = None
+                    retry_count = 0
+            else:
+                last_failed_command = None
+
             if parsed.action == "web_search":
                 query = parsed.action_input.get("query", parsed.action_input.get("raw", ""))
                 await asyncio.to_thread(save_search_result, query, tool_output[:300])
 
             await websocket.send_json({
                 "type": "tool_output",
+                "step": i + 1,
                 "tool_name": parsed.action,
+                "has_error": has_error,
                 "output": tool_output[:2000]
             })
 
@@ -276,13 +334,17 @@ async def stream_task(websocket: WebSocket, task_id: str):
             history_lines.append(f"  Action: {parsed.action}")
             history_lines.append(f"  Action Input: {json.dumps(parsed.action_input, ensure_ascii=False)}")
             history_lines.append(f"  Observation: {tool_output[:500]}")
+            if has_error:
+                history_lines.append(f"  STATUS: ERROR DETECTED - self-correction needed")
             history_lines.append("")
 
             await asyncio.sleep(0.5)
         else:
             await websocket.send_json({
                 "type": "final_answer",
-                "content": "Maximum iterations reached. Here's what I accomplished so far based on the steps above."
+                "content": "Maximum iterations reached. Here's what I accomplished so far based on the steps above.",
+                "steps_taken": max_iterations,
+                "retries": retry_count,
             })
             task["status"] = "max_iterations"
 
