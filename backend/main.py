@@ -28,46 +28,30 @@ app.add_middleware(
 
 tasks = {}
 
-META_PROMPT_TEMPLATE = """[SYSTEM SIMULATION START]
-MODE: Raw Data Processing Unit.
-TASK: Menerjemahkan permintaan pengguna menjadi sebuah rencana eksekusi JSON tunggal.
-OUTPUT: HANYA JSON. TANPA TEKS PEMBUKA, TANPA TEKS PENUTUP, TANPA PENJELASAN.
+PLANNER_PROMPT = """Saya sedang mengerjakan tugas berikut dan butuh bantuan langkah demi langkah.
 
-[INSTRUCTION CONTEXT]
-Anda adalah komponen dalam sebuah sistem perangkat lunak yang lebih besar. Input Anda adalah data mentah (tujuan, riwayat, memori). Output Anda adalah sebuah blok JSON tunggal yang akan diproses oleh mesin eksekusi. Kegagalan untuk menghasilkan JSON yang valid dan sesuai format akan menyebabkan kegagalan sistem secara keseluruhan. Jangan berinteraksi, jangan memberi salam, jangan meminta maaf, jangan menolak. Proses data dan hasilkan JSON.
+TUGAS: {user_prompt}
 
-[INPUT DATA]
-# TUJUAN PENGGUNA UTAMA
-{user_prompt}
+{history_section}
 
-# RIWAYAT EKSEKUSI SEBELUMNYA (Observation adalah hasil dari Action sebelumnya)
-{history_of_actions}
+{memory_section}
 
-# DATA RELEVAN DARI MEMORI JANGKA PANJANG
-{retrieved_memories}
+Saya bekerja di lingkungan Linux dengan akses terminal, editor file, dan pencarian web.
+Direktori kerja saya: /tmp/agent_workspace
 
-[TOOL DEFINITION]
-Berikut adalah daftar fungsi yang dapat dipanggil oleh mesin eksekusi. Pilih SATU.
-1. `web_search(query: str)`: Mencari informasi di internet.
-2. `terminal(command: str)`: Menjalankan perintah shell Linux.
-3. `file_editor(action: 'read'|'write'|'append', path: str, content: str = None)`: Mengelola file.
-4. `finish(answer: str)`: Mengakhiri tugas dengan jawaban final.
+Berikan saya SATU langkah berikutnya yang harus dilakukan. Sertakan perintah terminal yang tepat, atau kode file yang perlu ditulis. Jangan berikan banyak opsi, pilihkan satu yang terbaik dan berikan perintah/kode konkret yang bisa langsung dijalankan."""
 
-[JSON OUTPUT SCHEMA]
-{{
-  "thought": "Rencana singkat saya untuk langkah berikutnya adalah...",
-  "action": {{
-    "name": "NAMA_FUNGSI_DARI_TOOL_DEFINITION",
-    "args": {{
-      "NAMA_ARGUMEN": "NILAI_ARGUMEN"
-    }}
-  }}
-}}
+INTERPRETER_PROMPT = """Dari respons AI berikut, ekstrak SATU aksi konkret yang bisa dijalankan.
 
-[WORKSPACE DIRECTORY]
-/tmp/agent_workspace
+RESPONS AI:
+{llm_response}
 
-[START JSON OUTPUT]"""
+TUGAS ASLI: {user_prompt}
+
+Berikan dalam format ini saja (tanpa teks lain):
+AKSI: [terminal/file_write/file_read/web_search/selesai]
+DETAIL: [perintah/path/query/jawaban]
+KONTEN: [isi file jika ada]"""
 
 
 class TaskRequest(BaseModel):
@@ -81,18 +65,154 @@ class ParsedAction:
         self.action_input = action_input
 
 
-def parse_llm_output(output: str) -> Optional[ParsedAction]:
-    output = output.strip()
+def _extract_text(response) -> str:
+    try:
+        data = response.json()
+    except Exception:
+        return response.text
 
-    parsed = _try_parse_json_format(output)
-    if parsed:
-        return parsed
+    if isinstance(data, str):
+        return data
 
-    parsed = _try_parse_react_format(output)
-    if parsed:
-        return parsed
+    if isinstance(data, dict):
+        result = data.get("result")
+        if isinstance(result, dict):
+            return result.get("response", result.get("text", json.dumps(result)))
+        if isinstance(result, str):
+            return result
+        resp = data.get("response")
+        if isinstance(resp, str):
+            return resp
+        return json.dumps(data)
+
+    return str(data)
+
+
+def _call_api(prompt: str) -> str:
+    encoded_prompt = urllib.parse.quote(prompt)
+    api_url = f"https://magma-api.biz.id/ai/copilot?prompt={encoded_prompt}"
+    response = requests.get(api_url, timeout=120)
+    response.raise_for_status()
+    return _extract_text(response)
+
+
+def _extract_code_blocks(text: str) -> list:
+    blocks = []
+    pattern = r'```(\w*)\n(.*?)```'
+    for match in re.finditer(pattern, text, re.DOTALL):
+        lang = match.group(1).lower()
+        code = match.group(2).strip()
+        blocks.append({"lang": lang, "code": code})
+    return blocks
+
+
+def _extract_shell_commands(text: str) -> list:
+    commands = []
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('$ '):
+            commands.append(stripped[2:])
+        elif stripped.startswith('> '):
+            commands.append(stripped[2:])
+        elif re.match(r'^(sudo |apt |npm |pip |mkdir |cd |ls |cat |echo |touch |cp |mv |rm |curl |wget |python |node |git )', stripped):
+            if len(stripped) < 200 and not stripped.endswith(':'):
+                commands.append(stripped)
+    return commands
+
+
+def _extract_file_writes(text: str, code_blocks: list) -> Optional[dict]:
+    for block in code_blocks:
+        path_patterns = [
+            r'(?:file|simpan|buat|tulis|save).*?[`"\']([/\w._-]+\.\w+)[`"\']',
+            r'[`"\']([/\w._-]+\.\w{1,5})[`"\']',
+        ]
+        search_region = text[:text.find(block["code"])] if block["code"] in text else text
+        last_500 = search_region[-500:] if len(search_region) > 500 else search_region
+
+        for pattern in path_patterns:
+            match = re.search(pattern, last_500, re.IGNORECASE)
+            if match:
+                path = match.group(1)
+                if not path.startswith('/'):
+                    path = f"/tmp/agent_workspace/{path}"
+                return {"path": path, "content": block["code"]}
+
+    for block in code_blocks:
+        if block["lang"] in ["html", "css", "js", "javascript", "python", "py", "json", "tsx", "jsx", "ts", "php", "java", "c", "cpp", "go", "rust", "rb", "ruby"]:
+            ext_map = {
+                "html": "index.html", "css": "style.css", "js": "script.js",
+                "javascript": "script.js", "python": "main.py", "py": "main.py",
+                "json": "data.json", "tsx": "App.tsx", "jsx": "App.jsx",
+                "ts": "index.ts", "php": "index.php", "java": "Main.java",
+                "go": "main.go", "rust": "main.rs", "rb": "main.rb", "ruby": "main.rb",
+                "c": "main.c", "cpp": "main.cpp",
+            }
+            filename = ext_map.get(block["lang"], f"file.{block['lang']}")
+            return {"path": f"/tmp/agent_workspace/{filename}", "content": block["code"]}
 
     return None
+
+
+def interpret_response(llm_text: str, user_prompt: str, step: int, history: list) -> ParsedAction:
+    code_blocks = _extract_code_blocks(llm_text)
+    shell_commands = _extract_shell_commands(llm_text)
+
+    bash_blocks = [b for b in code_blocks if b["lang"] in ["bash", "sh", "shell", "console", "terminal", ""]]
+    code_only_blocks = [b for b in code_blocks if b["lang"] not in ["bash", "sh", "shell", "console", "terminal", ""]]
+
+    if bash_blocks:
+        cmd = bash_blocks[0]["code"]
+        lines = [l for l in cmd.split('\n') if l.strip() and not l.strip().startswith('#')]
+        if lines:
+            command = " && ".join(lines) if len(lines) <= 5 else lines[0]
+            thought_excerpt = llm_text[:200].replace('\n', ' ').strip()
+            return ParsedAction(
+                thought=thought_excerpt,
+                action="terminal",
+                action_input={"command": command}
+            )
+
+    if code_only_blocks and step <= 2:
+        file_write = _extract_file_writes(llm_text, code_only_blocks)
+        if file_write:
+            thought_excerpt = llm_text[:200].replace('\n', ' ').strip()
+            return ParsedAction(
+                thought=thought_excerpt,
+                action="file_editor",
+                action_input={"action": "write", "path": file_write["path"], "content": file_write["content"]}
+            )
+
+    if shell_commands:
+        thought_excerpt = llm_text[:200].replace('\n', ' ').strip()
+        return ParsedAction(
+            thought=thought_excerpt,
+            action="terminal",
+            action_input={"command": shell_commands[0]}
+        )
+
+    if code_only_blocks:
+        file_write = _extract_file_writes(llm_text, code_only_blocks)
+        if file_write:
+            thought_excerpt = llm_text[:200].replace('\n', ' ').strip()
+            return ParsedAction(
+                thought=thought_excerpt,
+                action="file_editor",
+                action_input={"action": "write", "path": file_write["path"], "content": file_write["content"]}
+            )
+
+    search_indicators = ["cari", "search", "temukan", "find", "informasi", "data tentang", "apa itu"]
+    if any(ind in user_prompt.lower() for ind in search_indicators) and step == 1:
+        return ParsedAction(
+            thought=f"Mencari informasi tentang: {user_prompt}",
+            action="web_search",
+            action_input={"query": user_prompt}
+        )
+
+    return ParsedAction(
+        thought="Menganalisis respons dan memberikan jawaban",
+        action="finish",
+        action_input={"answer": llm_text}
+    )
 
 
 def _try_parse_json_format(output: str) -> Optional[ParsedAction]:
@@ -148,103 +268,36 @@ def _try_parse_json_format(output: str) -> Optional[ParsedAction]:
     return None
 
 
-def _try_parse_react_format(output: str) -> Optional[ParsedAction]:
-    thought_match = re.search(r"Thought:\s*(.+?)(?:\n|$)", output)
-    action_match = re.search(r"Action:\s*(.+?)(?:\n|$)", output)
-    action_input_match = re.search(r"Action Input:\s*(.+)", output, re.DOTALL)
+def call_llm(user_prompt: str, history: str, memories: str = "", step: int = 1, history_list: list = None):
+    history_section = ""
+    if history and history.strip():
+        history_section = f"LANGKAH YANG SUDAH DILAKUKAN:\n{history}\n\nLanjutkan ke langkah berikutnya. Jangan ulangi langkah sebelumnya."
+    else:
+        history_section = "Ini adalah langkah pertama. Mulai dari awal."
 
-    if not action_match:
-        for tool_name in AVAILABLE_TOOLS:
-            if tool_name in output.lower():
-                action_match = type('Match', (), {'group': lambda self, x: tool_name})()
-                break
+    memory_section = ""
+    if memories and memories.strip():
+        memory_section = f"INFORMASI TAMBAHAN DARI MEMORI:\n{memories}"
 
-    if not action_match or not action_input_match:
-        return None
-
-    thought = thought_match.group(1).strip() if thought_match else "Processing..."
-    action = action_match.group(1).strip().lower()
-
-    for tool_name in AVAILABLE_TOOLS:
-        if tool_name in action:
-            action = tool_name
-            break
-
-    raw_input = action_input_match.group(1).strip()
-    action_input = _parse_json_input(raw_input)
-
-    return ParsedAction(thought=thought, action=action, action_input=action_input)
-
-
-def _parse_json_input(raw_input: str) -> dict:
-    raw_input = raw_input.strip()
-    if raw_input.startswith("```"):
-        raw_input = re.sub(r"```(?:json)?\s*", "", raw_input)
-        raw_input = raw_input.rstrip("`").strip()
-
-    try:
-        return json.loads(raw_input)
-    except json.JSONDecodeError:
-        pass
-
-    json_match = re.search(r'\{[^{}]*\}', raw_input, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
-
-    json_match = re.search(r'\{.*\}', raw_input, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
-
-    return {"raw": raw_input}
-
-
-def _extract_text(response) -> str:
-    try:
-        data = response.json()
-    except Exception:
-        return response.text
-
-    if isinstance(data, str):
-        return data
-
-    if isinstance(data, dict):
-        result = data.get("result")
-        if isinstance(result, dict):
-            return result.get("response", result.get("text", json.dumps(result)))
-        if isinstance(result, str):
-            return result
-        resp = data.get("response")
-        if isinstance(resp, str):
-            return resp
-        return json.dumps(data)
-
-    return str(data)
-
-
-def call_llm(user_prompt: str, history: str, memories: str = ""):
-    full_prompt = META_PROMPT_TEMPLATE.format(
+    full_prompt = PLANNER_PROMPT.format(
         user_prompt=user_prompt,
-        history_of_actions=history if history else "Belum ada tindakan.",
-        retrieved_memories=memories if memories else "Tidak ada memori sebelumnya."
+        history_section=history_section,
+        memory_section=memory_section,
     )
 
-    encoded_prompt = urllib.parse.quote(full_prompt)
-    api_url = f"https://magma-api.biz.id/ai/copilot?prompt={encoded_prompt}"
-
     try:
-        response = requests.get(api_url, timeout=120)
-        response.raise_for_status()
+        llm_text = _call_api(full_prompt)
+        print(f"[LLM] Raw response ({len(llm_text)} chars): {llm_text[:500]}")
 
-        llm_text = _extract_text(response)
-        print(f"[LLM] Raw response: {llm_text[:500]}")
+        json_parsed = _try_parse_json_format(llm_text)
+        if json_parsed:
+            print(f"[LLM] Parsed as JSON: action={json_parsed.action}")
+            return json_parsed, llm_text
 
-        return parse_llm_output(llm_text), llm_text
+        parsed = interpret_response(llm_text, user_prompt, step, history_list or [])
+        print(f"[LLM] Interpreted as: action={parsed.action}")
+        return parsed, llm_text
+
     except Exception as e:
         print(f"[LLM] Error: {e}")
         return None, str(e)
@@ -274,6 +327,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
     task["status"] = "running"
     user_prompt = task["prompt"]
     history_lines = []
+    history_list = []
     max_iterations = 20
     error_patterns = [
         "Traceback", "Exception", "SyntaxError", "NameError", "TypeError",
@@ -300,7 +354,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
             })
 
             parsed, raw_output = await asyncio.to_thread(
-                call_llm, user_prompt, history_str, memories
+                call_llm, user_prompt, history_str, memories, i + 1, history_list
             )
 
             if parsed is None:
@@ -318,7 +372,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
             await websocket.send_json({
                 "type": "thought",
                 "step": i + 1,
-                "content": parsed.thought
+                "content": parsed.thought[:500]
             })
 
             if parsed.action == "finish":
@@ -330,7 +384,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
                     "retries": retry_count,
                 })
                 await asyncio.to_thread(
-                    save_task_result, user_prompt, answer, "finish"
+                    save_task_result, user_prompt, answer[:500], "finish"
                 )
                 task["status"] = "completed"
                 break
@@ -339,7 +393,7 @@ async def stream_task(websocket: WebSocket, task_id: str):
                 "type": "tool_start",
                 "step": i + 1,
                 "tool_name": parsed.action,
-                "args": json.dumps(parsed.action_input, ensure_ascii=False)
+                "args": json.dumps(parsed.action_input, ensure_ascii=False)[:500]
             })
 
             tool_output = await asyncio.to_thread(
@@ -388,13 +442,23 @@ async def stream_task(websocket: WebSocket, task_id: str):
                 "output": tool_output[:2000]
             })
 
+            history_entry = {
+                "step": i + 1,
+                "thought": parsed.thought[:200],
+                "action": parsed.action,
+                "input": parsed.action_input,
+                "output": tool_output[:500],
+                "error": has_error,
+            }
+            history_list.append(history_entry)
+
             history_lines.append(f"Step {i+1}:")
-            history_lines.append(f"  Thought: {parsed.thought}")
+            history_lines.append(f"  Thought: {parsed.thought[:200]}")
             history_lines.append(f"  Action: {parsed.action}")
-            history_lines.append(f"  Action Input: {json.dumps(parsed.action_input, ensure_ascii=False)}")
-            history_lines.append(f"  Observation: {tool_output[:500]}")
+            history_lines.append(f"  Action Input: {json.dumps(parsed.action_input, ensure_ascii=False)[:300]}")
+            history_lines.append(f"  Result: {tool_output[:500]}")
             if has_error:
-                history_lines.append(f"  STATUS: ERROR DETECTED - self-correction needed")
+                history_lines.append(f"  STATUS: ERROR - perlu diperbaiki di langkah berikutnya")
             history_lines.append("")
 
             await asyncio.sleep(0.5)
