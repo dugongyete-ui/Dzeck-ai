@@ -13,7 +13,8 @@ An autonomous AI agent web application built with a React frontend and Python Fa
 ```
 /
 ├── backend/
-│   └── main.py          # FastAPI server, agent logic, tool execution
+│   ├── main.py          # FastAPI server, ReAct loop, WebSocket streaming
+│   └── tool_executor.py # Tool functions (web_search, terminal, file_editor, finish) + dispatcher
 ├── frontend/
 │   ├── index.html       # Entry HTML
 │   ├── public/          # Static assets
@@ -41,4 +42,5 @@ An autonomous AI agent web application built with a React frontend and Python Fa
 - Frontend builds to `frontend/dist/`, served by FastAPI on port 5000
 
 ## Recent Changes
+- 2026-02-15: Refactored tool execution into separate `tool_executor.py` module with dispatcher pattern
 - 2026-02-15: Initial build of full-stack autonomous AI agent
